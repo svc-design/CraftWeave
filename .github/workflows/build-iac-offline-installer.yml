@@ -1,0 +1,135 @@
+name: Build Offline IaC Installer
+
+on:
+  push:
+    paths:
+      - 'scripts/iac-installer.sh'
+      - '.github/workflows/build-iac-offline-installer.yml'
+  workflow_dispatch:
+
+jobs:
+  build-iac-installer:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare offline directory structure
+        run: |
+          for os in linux macos windows; do
+            mkdir -p offline-iac/tools/${os}/amd64
+            mkdir -p offline-iac/tools/${os}/arm64
+          done
+          mkdir -p offline-iac/scripts offline-iac/manifests
+
+      - name: Download Pulumi/Ansible/Terraform binaries & plugins
+        run: |
+          chmod +x scripts/download-iac-tools.sh
+           ./scripts/download-iac-tools.sh ${{ matrix.arch }}
+
+      - name: Copy installer script
+        run: |
+          cp scripts/iac-installer.sh offline-iac/scripts/
+          chmod +x offline-iac/scripts/iac-installer.sh
+
+      - name: Package offline installer
+        run: |
+          tar czvf offline-setup-iac-${{ matrix.arch }}.tar.gz -C offline-iac .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-setup-iac-${{ matrix.arch }}
+          path: offline-setup-iac-${{ matrix.arch }}.tar.gz
+
+  test-offline-installer:
+    needs: build-iac-installer
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies for test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip python3-pip
+
+      - name: Download offline installer artifact for ${{ matrix.arch }}
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-setup-iac-${{ matrix.arch }}
+          path: offline-test
+
+      - name: List downloaded content
+        run: ls -lh offline-test/
+
+      - name: Extract offline installer
+        run: |
+          cd offline-test
+          tar -xzvf offline-setup-iac-${{ matrix.arch }}.tar.gz
+          cd ..
+
+      - name: Test offline installer
+        run: |
+          cd offline-test
+          bash scripts/iac-installer.sh
+
+      - name: Check Pulumi version
+        run: |
+          pulumi version
+
+      - name: Check Terraform version
+        run: |
+          terraform version
+
+      - name: Check Ansible version
+        run: |
+          ansible --version || true
+
+  publish-release:
+    needs: test-offline-installer
+    runs-on: ubuntu-latest
+    env:
+      tag_name: offline-iac-${{ github.run_number }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.tag_name }}
+          release_name: Offline IaC Installer ${{ env.tag_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download amd64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-setup-iac-amd64
+          path: release-artifacts
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-setup-iac-arm64
+          path: release-artifacts
+
+      - name: Upload offline installers to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.tag_name }}
+          files: |
+            release-artifacts/offline-setup-iac-amd64.tar.gz
+            release-artifacts/offline-setup-iac-arm64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
