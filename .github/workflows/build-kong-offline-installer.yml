@@ -1,0 +1,116 @@
+name: Build Offline Kong Gateway Installer
+
+on:
+  push:
+    paths:
+      - 'scripts/make_Kong_Gateway_offline_package.sh'
+      - '.github/workflows/build-kong-offline-installer.yml'
+  workflow_dispatch:
+
+jobs:
+  build-kong-installer:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y curl tar tree
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl -sfL https://get.k3s.io | sh -
+          mkdir -p $HOME/.kube
+          sudo cp /etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+          sudo chown $USER:$USER $HOME/.kube/config
+          helm version
+
+      - name: Run Offline Package Builder
+        run: |
+          chmod +x scripts/make_Kong_Gateway_offline_package.sh
+          ./scripts/make_Kong_Gateway_offline_package.sh
+
+      - name: Compress Offline Installer
+        run: |
+          tar czvf kong-offline-package-${{ matrix.arch }}.tar.gz kong-offline-resources
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kong-offline-package-${{ matrix.arch }}
+          path: kong-offline-package-${{ matrix.arch }}.tar.gz
+
+  test-kong-installer:
+    needs: build-kong-installer
+    strategy:
+      matrix:
+        arch: [amd64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kong-offline-package-${{ matrix.arch }}
+          path: ./test-dir
+
+      - name: Extract Package
+        run: |
+          cd test-dir
+          tar -xzvf kong-offline-package-${{ matrix.arch }}.tar.gz
+
+      - name: Setup K3s and Test Kong
+        run: |
+          curl -sfL https://get.k3s.io | sh -
+          kubectl get nodes
+          bash test-dir/kong-offline-resources/install-kong.sh
+          kubectl get gatewayclass,gateway -A
+          kubectl get svc -n kong
+
+  publish-release:
+    needs: test-kong-installer
+    runs-on: ubuntu-latest
+    env:
+      tag_name: kong-offline-${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.tag_name }}
+          release_name: Kong Gateway Offline Build ${{ env.tag_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download amd64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kong-offline-package-amd64
+          path: release-artifacts
+
+      - name: Download arm64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kong-offline-package-arm64
+          path: release-artifacts
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.tag_name }}
+          files: |
+            release-artifacts/kong-offline-package-amd64.tar.gz
+            release-artifacts/kong-offline-package-arm64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
